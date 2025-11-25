@@ -3,24 +3,25 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 
+// Minimal Chainlink Aggregator interface to avoid external deps in MVP
+interface AggregatorV3Interface {
+    function latestRoundData()
+        external
+        view
+        returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+}
+
 /// @title AviatorGame (Flight Mode)
 /// @notice Minimal MVP crash game with house edge and simple crash generation.
 ///         This version uses pseudo-randomness for hackathon MVP; replace with
 ///         Chainlink VRF + price feeddriven volatility for production.
 contract AviatorGame is Ownable {
-    // Minimal Chainlink Aggregator interface to avoid external deps in MVP
-    interface AggregatorV3Interface {
-        function latestRoundData()
-            external
-            view
-            returns (
-                uint80 roundId,
-                int256 answer,
-                uint256 startedAt,
-                uint256 updatedAt,
-                uint80 answeredInRound
-            );
-    }
     struct Bet {
         uint256 amountWei;
         bool active;

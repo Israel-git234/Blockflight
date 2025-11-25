@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNotifications } from '../components/NotificationsProvider'
-import { getContract } from '../lib/ethersClient'
-import { COMMUNITY_MARKET_ABI } from '../lib/communityAbi'
+import { useCommunityMarketContract } from '../lib/useCommunityMarketContract'
+import { useTransactionFeedback } from '../lib/useTransactionFeedback'
+import { parseContractError, getErrorMessage } from '../lib/errorHandler'
+import { getProvider } from '../lib/ethersClient'
+import LoadingSpinner from '../components/LoadingSpinner'
+import ErrorMessage from '../components/ErrorMessage'
+import TransactionHistory from '../components/TransactionHistory'
 
 interface CommunityMarketProps {
   account: string | null
@@ -25,8 +30,20 @@ interface CommunityBet {
 
 export default function CommunityMarket({ account }: CommunityMarketProps) {
   const { addNotification } = useNotifications()
-  const COMMUNITY_ADDR = (import.meta as any).env?.VITE_COMMUNITY_MARKET_CONTRACT as string | undefined
-  const [useOnChain, setUseOnChain] = useState<boolean>(!!COMMUNITY_ADDR)
+  const { trackTransaction, hasPending } = useTransactionFeedback()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<any>(null)
+  const [useOnChain, setUseOnChain] = useState(true)
+  
+  // Wave 2: Contract integration
+  const {
+    createMarket: contractCreateMarket,
+    bet: contractBet,
+    claim: contractClaim,
+    getMarket,
+    getMarketCount,
+    isReady: contractReady
+  } = useCommunityMarketContract(account)
   const [communityStats, setCommunityStats] = useState({
     totalMarkets: 1247,
     activeUsers: 2847,
@@ -116,59 +133,105 @@ export default function CommunityMarket({ account }: CommunityMarketProps) {
     try { localStorage.setItem('bf_community_follows', JSON.stringify(following)) } catch {}
   }, [following])
 
+  // Wave 2: Enhanced createBet with contract integration
   const createBet = async () => {
     if (!account) {
-      alert('Connect wallet to create a bet')
+      addNotification({ title: 'Wallet Required', message: 'Please connect your wallet to create a market', tag: 'error' })
       return
     }
     if (!title.trim() || !description.trim()) {
-      alert('Please add a title and description')
+      addNotification({ title: 'Invalid Input', message: 'Please add a title and description', tag: 'error' })
       return
     }
-    const id = `b${Date.now()}`
-    if (useOnChain && COMMUNITY_ADDR) {
-      try {
-        const contract = await getContract(COMMUNITY_ADDR, COMMUNITY_MARKET_ABI, true)
-        const endsAt = Math.floor((Date.now() + durationHours * 3600000) / 1000)
-        const yesX100 = Math.floor((parseFloat(yesOdds) || 2.0) * 100)
-        const noX100 = Math.floor((parseFloat(noOdds) || 2.0) * 100)
-        const tx = await contract.createMarket(
-          title.trim(), description.trim(), category, (isPrivate && groupId.trim()) ? groupId.trim() : '',
-          endsAt, yesX100, noX100
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      const endsAt = Math.floor((Date.now() + durationHours * 3600000) / 1000)
+      const yesX100 = Math.floor((parseFloat(yesOdds) || 2.0) * 100)
+      const noX100 = Math.floor((parseFloat(noOdds) || 2.0) * 100)
+      const privateGroupId = (isPrivate && groupId.trim()) ? groupId.trim() : ''
+
+      let marketId: number | null = null
+      if (useOnChain && contractReady) {
+        // Create market on-chain
+        const receipt = await contractCreateMarket(
+          title.trim(),
+          description.trim(),
+          category,
+          privateGroupId,
+          endsAt,
+          yesX100,
+          noX100
         )
-        await tx.wait()
-      } catch (e) {
-        console.error('On-chain create failed, falling back to local', e)
+
+        // Track transaction
+        const provider = getProvider()
+        await trackTransaction(
+          receipt.hash,
+          `Creating market: ${title.trim()}`,
+          async (hash) => {
+            const txReceipt = await provider.waitForTransaction(hash)
+            // Try to extract market ID from events
+            if (txReceipt && txReceipt.logs) {
+              // Market ID extraction would happen here if needed
+            }
+            return txReceipt
+          }
+        )
+
+        addNotification({
+          title: 'Market Created!',
+          message: `Market created successfully. Transaction: ${receipt.hash.slice(0, 10)}...`,
+          tag: 'success'
+        })
       }
-    }
-    const newBet: CommunityBet = {
-      id,
-      title: title.trim(),
-      description: description.trim(),
-      category,
-      creator: account.slice(0, 6) + '...' + account.slice(-4),
-      endsAt: new Date(Date.now() + durationHours * 3600000),
-      yesOdds: parseFloat(yesOdds) || 2.0,
-      noOdds: parseFloat(noOdds) || 2.0,
-      totalYes: 0,
-      totalNo: 0,
-      followers: 0,
-      privateGroupId: isPrivate && groupId.trim() ? groupId.trim() : undefined
-    }
-    setBets(prev => [newBet, ...prev])
-    if (notifyFollowers) {
+
+      // Update local state
+      const id = marketId ? `market-${marketId}` : `b${Date.now()}`
+      const newBet: CommunityBet = {
+        id,
+        title: title.trim(),
+        description: description.trim(),
+        category,
+        creator: account.slice(0, 6) + '...' + account.slice(-4),
+        endsAt: new Date(Date.now() + durationHours * 3600000),
+        yesOdds: parseFloat(yesOdds) || 2.0,
+        noOdds: parseFloat(noOdds) || 2.0,
+        totalYes: 0,
+        totalNo: 0,
+        followers: 0,
+        privateGroupId: isPrivate && groupId.trim() ? groupId.trim() : undefined
+      }
+      setBets(prev => [newBet, ...prev])
+      
+      if (notifyFollowers) {
+        addNotification({
+          title: 'New Community Prediction',
+          message: `${newBet.title} • YES ${newBet.yesOdds.toFixed(2)}× / NO ${newBet.noOdds.toFixed(2)}×${newBet.privateGroupId ? ' • Private' : ''}`,
+          tag: 'community'
+        })
+      }
+
+      // Reset form
+      setTitle('')
+      setDescription('')
+      setCategory('General')
+      setDurationHours(24)
+      setYesOdds('2.0')
+      setNoOdds('2.0')
+    } catch (err: any) {
+      const parsed = parseContractError(err)
+      setError(err)
       addNotification({
-        title: 'New Community Prediction',
-        message: `${newBet.title} • YES ${newBet.yesOdds.toFixed(2)}× / NO ${newBet.noOdds.toFixed(2)}×${newBet.privateGroupId ? ' • Private' : ''}`,
-        tag: 'community'
+        title: 'Failed to Create Market',
+        message: getErrorMessage(parsed),
+        tag: 'error'
       })
+    } finally {
+      setLoading(false)
     }
-    setTitle('')
-    setDescription('')
-    setCategory('General')
-    setDurationHours(24)
-    setYesOdds('2.0')
-    setNoOdds('2.0')
   }
 
   const followCreator = (creator: string) => {
@@ -177,30 +240,64 @@ export default function CommunityMarket({ account }: CommunityMarketProps) {
     setBets(prev => prev.map(b => b.creator === creator ? { ...b, followers: (following[creator] ? Math.max(0, b.followers - 1) : b.followers + 1) } : b))
   }
 
-  const placeBet = (betId: string, side: 'YES' | 'NO') => {
+  // Wave 2: Enhanced placeBet with contract integration
+  const placeBet = async (betId: string, side: 'YES' | 'NO') => {
     if (!account) {
-      alert('Connect wallet to bet')
+      addNotification({ title: 'Wallet Required', message: 'Please connect your wallet to place a bet', tag: 'error' })
       return
     }
+
     const amount = parseFloat(wager) || 0.01
-    if (useOnChain && COMMUNITY_ADDR) {
-      // best-effort on-chain bet; UI updates locally regardless
-      getContract(COMMUNITY_ADDR, COMMUNITY_MARKET_ABI, true)
-        .then(async (c) => {
-          const idNum = 1 // NOTE: For a full integration, store and sync on-chain IDs
-          const tx = await c.bet(idNum, side === 'YES', { value: (amount * 1e18).toFixed(0) })
-          await tx.wait()
+    setError(null)
+    setLoading(true)
+
+    try {
+      // Extract market ID from betId (format: "market-123" or "b123456")
+      const marketIdMatch = betId.match(/market-(\d+)|b(\d+)/)
+      const marketId = marketIdMatch ? parseInt(marketIdMatch[1] || marketIdMatch[2]) : 1
+
+      if (useOnChain && contractReady) {
+        // Place bet on-chain
+        const receipt = await contractBet(marketId, side === 'YES', wager)
+        
+        // Track transaction
+        const provider = getProvider()
+        await trackTransaction(
+          receipt.hash,
+          `Placing ${side} bet on "${bets.find(b => b.id === betId)?.title || 'market'}"`,
+          async (hash) => {
+            const txReceipt = await provider.waitForTransaction(hash)
+            return txReceipt
+          }
+        )
+
+        addNotification({
+          title: 'Bet Placed!',
+          message: `Successfully placed ${side} bet of ${wager} ETH`,
+          tag: 'success'
         })
-        .catch(err => console.warn('On-chain bet failed (demo continues locally):', err))
-    }
-    setBets(prev => prev.map(b => {
-      if (b.id !== betId) return b
-      if (side === 'YES') {
-        return { ...b, totalYes: b.totalYes + amount }
-      } else {
-        return { ...b, totalNo: b.totalNo + amount }
       }
-    }))
+
+      // Update local state
+      setBets(prev => prev.map(b => {
+        if (b.id !== betId) return b
+        if (side === 'YES') {
+          return { ...b, totalYes: b.totalYes + amount }
+        } else {
+          return { ...b, totalNo: b.totalNo + amount }
+        }
+      }))
+    } catch (err: any) {
+      const parsed = parseContractError(err)
+      setError(err)
+      addNotification({
+        title: 'Bet Failed',
+        message: getErrorMessage(parsed),
+        tag: 'error'
+      })
+    } finally {
+      setLoading(false)
+    }
   }
 
   const styles = {
@@ -269,7 +366,53 @@ export default function CommunityMarket({ account }: CommunityMarketProps) {
   }
 
   return (
-    <div>
+    <div style={{ position: 'relative' }}>
+      {/* Wave 2: Contract Status */}
+      {contractReady && useOnChain && (
+        <div style={{
+          background: 'rgba(34,197,94,0.1)',
+          border: '1px solid rgba(34,197,94,0.3)',
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 16,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8
+        }}>
+          <span>✅</span>
+          <span style={{ color: '#22c55e', fontSize: 14, fontWeight: 'bold' }}>
+            Connected to Smart Contract
+          </span>
+        </div>
+      )}
+
+      {/* Wave 2: Error Display */}
+      {error && (
+        <ErrorMessage 
+          error={error} 
+          onRetry={() => setError(null)}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
+      {/* Wave 2: Loading Overlay */}
+      {loading && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0,0,0,0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <LoadingSpinner message="Processing transaction..." />
+        </div>
+      )}
+
       {/* Community Statistics */}
       <div style={{
         background: 'linear-gradient(135deg, rgba(8, 145, 178, 0.1) 0%, rgba(14, 116, 144, 0.1) 100%)',
@@ -373,8 +516,16 @@ export default function CommunityMarket({ account }: CommunityMarketProps) {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <button style={styles.button} onClick={createBet}>
-          Create Prediction
+          <button 
+            style={{
+              ...styles.button,
+              opacity: loading || hasPending ? 0.6 : 1,
+              cursor: loading || hasPending ? 'not-allowed' : 'pointer'
+            }} 
+            onClick={createBet}
+            disabled={loading || hasPending}
+          >
+            {loading ? 'Creating...' : hasPending ? 'Transaction Pending...' : 'Create Prediction'}
           </button>
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#a78bfa' }}>
             <input type="checkbox" checked={notifyFollowers} onChange={e => setNotifyFollowers(e.target.checked)} />
@@ -422,8 +573,29 @@ export default function CommunityMarket({ account }: CommunityMarketProps) {
               <div>
                 <div style={{display:'flex', gap:'0.5rem'}}>
                   <input style={{...styles.input, width: 100}} value={wager} onChange={e=>setWager(e.target.value)} />
-                  <button style={styles.button} onClick={() => placeBet(b.id, 'YES')}>Bet YES</button>
-                  <button style={{...styles.button, background:'linear-gradient(45deg,#ef4444,#b91c1c)'}} onClick={() => placeBet(b.id, 'NO')}>Bet NO</button>
+                  <button 
+                    style={{
+                      ...styles.button,
+                      opacity: loading || hasPending ? 0.6 : 1,
+                      cursor: loading || hasPending ? 'not-allowed' : 'pointer'
+                    }} 
+                    onClick={() => placeBet(b.id, 'YES')}
+                    disabled={loading || hasPending}
+                  >
+                    {loading ? 'Placing...' : 'Bet YES'}
+                  </button>
+                  <button 
+                    style={{
+                      ...styles.button, 
+                      background:'linear-gradient(45deg,#ef4444,#b91c1c)',
+                      opacity: loading || hasPending ? 0.6 : 1,
+                      cursor: loading || hasPending ? 'not-allowed' : 'pointer'
+                    }} 
+                    onClick={() => placeBet(b.id, 'NO')}
+                    disabled={loading || hasPending}
+                  >
+                    {loading ? 'Placing...' : 'Bet NO'}
+                  </button>
                 </div>
                 <div style={{display:'flex', gap:'0.5rem', marginTop:'0.5rem'}}>
                   <button style={{...styles.button, background: following[b.creator]?'linear-gradient(45deg,#10b981,#059669)':'rgba(124,58,237,0.2)'}} onClick={() => followCreator(b.creator)}>
@@ -435,6 +607,13 @@ export default function CommunityMarket({ account }: CommunityMarketProps) {
           ))}
         </div>
       </div>
+
+      {/* Wave 2: Transaction History */}
+      {account && (
+        <div style={{ marginTop: 24 }}>
+          <TransactionHistory />
+        </div>
+      )}
       </div>
     </div>
   )

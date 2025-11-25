@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { useMarketData } from '../lib/useMarketData'
+import { useCruiseModeContract } from '../lib/useCruiseModeContract'
+import { useTransactionFeedback } from '../lib/useTransactionFeedback'
+import { useNotifications } from '../components/NotificationsProvider'
+import { parseContractError, getErrorMessage } from '../lib/errorHandler'
+import { getProvider } from '../lib/ethersClient'
+import LoadingSpinner from '../components/LoadingSpinner'
+import ErrorMessage from '../components/ErrorMessage'
+import TransactionHistory from '../components/TransactionHistory'
 
 interface CruiseModeProps {
   account: string | null
@@ -18,6 +26,21 @@ interface Stake {
 }
 
 export default function CruiseMode({ account, chainId }: CruiseModeProps) {
+  // Wave 2: Contract integration and transaction feedback
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<any>(null)
+  const [useContract, setUseContract] = useState(true)
+  const { addNotification } = useNotifications()
+  const { trackTransaction, hasPending } = useTransactionFeedback()
+  const {
+    stake: contractStake,
+    unstake: contractUnstake,
+    getStake,
+    previewPayout,
+    canUnstake: contractCanUnstake,
+    isReady: contractReady
+  } = useCruiseModeContract(account)
+
   // Staking state
   const [stakeAmount, setStakeAmount] = useState('1.0')
   const [stakeDuration, setStakeDuration] = useState(3) // days
@@ -158,43 +181,145 @@ export default function CruiseMode({ account, chainId }: CruiseModeProps) {
     }))
   }, [ethPrice])
 
+  // Wave 2: Enhanced startCruise with contract integration
   const startCruise = async () => {
     if (!account) {
-      alert('Please connect your wallet first!')
+      addNotification({ title: 'Wallet Required', message: 'Please connect your wallet first!', tag: 'error' })
       return
     }
     
     const amount = parseFloat(stakeAmount)
     if (amount > balance) {
-      alert('Insufficient balance!')
+      addNotification({ title: 'Insufficient Balance', message: 'You do not have enough funds', tag: 'error' })
       return
     }
-    
-    // Create new stake
-    const newStake: Stake = {
-      id: Date.now(),
-      amount,
-      startTime: new Date(),
-      duration: stakeDuration,
-      startPrice: ethPrice,
-      currentValue: amount,
-      trend: 'neutral',
-      status: 'active'
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      const lockSeconds = stakeDuration * 24 * 60 * 60 // Convert days to seconds
+
+      if (useContract && contractReady) {
+        // Stake on-chain
+        const receipt = await contractStake(stakeAmount, lockSeconds)
+        
+        // Track transaction
+        const provider = getProvider()
+        await trackTransaction(
+          receipt.hash,
+          `Staking ${stakeAmount} ETH for ${stakeDuration} days`,
+          async (hash) => {
+            const txReceipt = await provider.waitForTransaction(hash)
+            return txReceipt
+          }
+        )
+
+        addNotification({
+          title: 'Stake Placed!',
+          message: `Successfully staked ${stakeAmount} ETH for ${stakeDuration} days`,
+          tag: 'success'
+        })
+      }
+
+      // Update local state
+      const newStake: Stake = {
+        id: Date.now(),
+        amount,
+        startTime: new Date(),
+        duration: stakeDuration,
+        startPrice: ethPrice,
+        currentValue: amount,
+        trend: 'neutral',
+        status: 'active'
+      }
+      
+      setActiveStakes(prev => [...prev, newStake])
+      setBalance(prev => prev - amount)
+      setStakeAmount('')
+    } catch (err: any) {
+      const parsed = parseContractError(err)
+      setError(err)
+      addNotification({
+        title: 'Stake Failed',
+        message: getErrorMessage(parsed),
+        tag: 'error'
+      })
+    } finally {
+      setLoading(false)
     }
-    
-    setActiveStakes(prev => [...prev, newStake])
-    setBalance(prev => prev - amount)
-    setStakeAmount('')
   }
 
-  const claimStake = (stakeId: number) => {
-    setActiveStakes(stakes => stakes.map(stake => {
-      if (stake.id === stakeId && stake.status === 'active') {
-        setBalance(prev => prev + stake.currentValue)
-        return { ...stake, status: 'claimed' as const }
+  // Wave 2: Enhanced claimStake with contract integration
+  const claimStake = async (stakeId: number) => {
+    if (!account) {
+      addNotification({ title: 'Wallet Required', message: 'Please connect your wallet', tag: 'error' })
+      return
+    }
+
+    const stake = activeStakes.find(s => s.id === stakeId)
+    if (!stake || stake.status !== 'active') {
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      if (useContract && contractReady) {
+        // Check if can unstake
+        const canUnstake = await contractCanUnstake(account)
+        if (!canUnstake) {
+          addNotification({
+            title: 'Cannot Unstake',
+            message: 'Lock period has not expired yet',
+            tag: 'error'
+          })
+          return
+        }
+
+        // Unstake on-chain
+        const receipt = await contractUnstake()
+        
+        // Track transaction
+        const provider = getProvider()
+        await trackTransaction(
+          receipt.hash,
+          `Unstaking ${stake.amount} ETH`,
+          async (hash) => {
+            const txReceipt = await provider.waitForTransaction(hash)
+            return txReceipt
+          }
+        )
+
+        // Get payout info
+        const payout = await previewPayout(account)
+        addNotification({
+          title: 'Unstaked!',
+          message: `Successfully unstaked. Received ${payout.payoutEth} ETH`,
+          tag: 'success'
+        })
       }
-      return stake
-    }))
+
+      // Update local state
+      setActiveStakes(stakes => stakes.map(s => {
+        if (s.id === stakeId && s.status === 'active') {
+          setBalance(prev => prev + s.currentValue)
+          return { ...s, status: 'claimed' as const }
+        }
+        return s
+      }))
+    } catch (err: any) {
+      const parsed = parseContractError(err)
+      setError(err)
+      addNotification({
+        title: 'Unstake Failed',
+        message: getErrorMessage(parsed),
+        tag: 'error'
+      })
+    } finally {
+      setLoading(false)
+    }
   }
 
   const calculateProjectedReturn = () => {
@@ -416,13 +541,83 @@ export default function CruiseMode({ account, chainId }: CruiseModeProps) {
   }
 
   return (
-    <div style={styles.container}>
+    <div style={{ ...styles.container, position: 'relative' }}>
+      {/* Wave 2: Contract Status */}
+      {contractReady && useContract && (
+        <div style={{
+          background: 'rgba(34,197,94,0.1)',
+          border: '1px solid rgba(34,197,94,0.3)',
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 16,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8
+        }}>
+          <span>✅</span>
+          <span style={{ color: '#22c55e', fontSize: 14, fontWeight: 'bold' }}>
+            Connected to Smart Contract
+          </span>
+        </div>
+      )}
+
+      {/* Wave 2: Error Display */}
+      {error && (
+        <ErrorMessage 
+          error={error} 
+          onRetry={() => setError(null)}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
+      {/* Wave 2: Loading Overlay */}
+      {loading && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0,0,0,0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <LoadingSpinner message="Processing transaction..." />
+        </div>
+      )}
+
       {/* Staking Panel */}
       <div style={styles.stakingPanel}>
         <h2 style={styles.title}>🚢 Cruise Mode</h2>
         <p style={styles.subtitle}>
           Long-term prediction staking. Ride the market waves and amplify your gains over time.
         </p>
+
+        {/* Wave 2: Contract Toggle */}
+        {contractReady && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            marginBottom: 16,
+            padding: 8,
+            background: 'rgba(0,0,0,0.2)',
+            borderRadius: 6
+          }}>
+            <input
+              type="checkbox"
+              id="use-contract-cruise"
+              checked={useContract}
+              onChange={(e) => setUseContract(e.target.checked)}
+              style={{ cursor: 'pointer' }}
+            />
+            <label htmlFor="use-contract-cruise" style={{ color: '#9ca3af', fontSize: 12, cursor: 'pointer' }}>
+              Use Smart Contract {useContract ? '(On-chain)' : '(Simulation)'}
+            </label>
+          </div>
+        )}
 
         {/* Impressive Staking Statistics */}
         <div style={{
@@ -641,13 +836,13 @@ export default function CruiseMode({ account, chainId }: CruiseModeProps) {
 
         <button
           onClick={startCruise}
-          disabled={!stakeAmount || parseFloat(stakeAmount) > balance || !account}
+          disabled={!stakeAmount || parseFloat(stakeAmount) > balance || !account || loading || hasPending}
           style={{
             ...styles.primaryButton,
             ...((!stakeAmount || parseFloat(stakeAmount) > balance || !account) ? styles.disabledButton : {})
           }}
         >
-          {!account ? 'Connect Wallet' : 'Start Cruise 🚢'}
+          {loading ? 'Staking...' : hasPending ? 'Transaction Pending...' : !account ? 'Connect Wallet' : 'Start Cruise 🚢'}
         </button>
       </div>
 
@@ -718,9 +913,14 @@ export default function CruiseMode({ account, chainId }: CruiseModeProps) {
                 <div style={{ display: 'flex', gap: '1rem' }}>
                   <button
                     onClick={() => claimStake(stake.id)}
-                    style={styles.claimButton}
+                    disabled={loading || hasPending}
+                    style={{
+                      ...styles.claimButton,
+                      opacity: loading || hasPending ? 0.6 : 1,
+                      cursor: loading || hasPending ? 'not-allowed' : 'pointer'
+                    }}
                   >
-                    Claim Now 💰
+                    {loading ? 'Unstaking...' : hasPending ? 'Pending...' : 'Claim Now 💰'}
                   </button>
                   <div style={{ 
                     flex: 1, 

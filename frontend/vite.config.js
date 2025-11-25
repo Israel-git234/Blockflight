@@ -10,6 +10,19 @@ export default defineConfig({
       },
     }),
   ],
+  // Wave 2: Bundle optimization for scalability
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'ethers-vendor': ['ethers'],
+          'ui-vendor': ['lucide-react']
+        }
+      }
+    },
+    chunkSizeWarningLimit: 1000
+  },
   server: {
     proxy: {
       '/api/coingecko': {

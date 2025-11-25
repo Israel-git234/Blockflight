@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title CommunityMarket - MVP pooled YES/NO prediction markets
 /// @notice Centralized resolution for hackathon MVP. Replace with oracle for production.
@@ -25,7 +25,7 @@ contract CommunityMarket is Ownable, ReentrancyGuard {
     uint256 public marketCount;
     mapping(uint256 => Market) public markets; // id => market
     mapping(uint256 => mapping(address => uint256)) public userYesWei; // id => user => amount
-    mapping<uint256 => mapping(address => uint256)) public userNoWei;  // id => user => amount
+    mapping(uint256 => mapping(address => uint256)) public userNoWei;
 
     uint256 public houseEdgeBps = 200; // 2%
     address public treasury;

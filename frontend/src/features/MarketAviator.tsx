@@ -1,5 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMarketData } from '../lib/useMarketData'
+import { useAviatorContract } from '../lib/useAviatorContract'
+import { useTransactionFeedback } from '../lib/useTransactionFeedback'
+import { useNotifications } from '../components/NotificationsProvider'
+import { parseContractError, getErrorMessage } from '../lib/errorHandler'
+import { getProvider } from '../lib/ethersClient'
+import LoadingSpinner from '../components/LoadingSpinner'
+import ErrorMessage from '../components/ErrorMessage'
+import TransactionHistory from '../components/TransactionHistory'
 
 type MarketAviatorProps = {
   account: string | null
@@ -24,8 +32,45 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
   const [volatilityHistory, setVolatilityHistory] = useState<number[]>([])
   const [liveTraders, setLiveTraders] = useState<Array<{name: string, bet: number, multiplier: number}>>([])
 
+  // Wave 2: Contract integration and transaction feedback
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<any>(null)
+  const [contractRoundInfo, setContractRoundInfo] = useState<any>(null)
+  const [useContract, setUseContract] = useState(true) // Toggle for contract vs simulation
+
   const { priceUsd, emaShort, emaLong, volatility, health } = useMarketData(15000)
+  const { addNotification } = useNotifications()
+  const { trackTransaction, hasPending } = useTransactionFeedback()
+  const { 
+    placeBet: contractPlaceBet, 
+    cashOut: contractCashOut, 
+    getRoundInfo, 
+    getBet,
+    isReady: contractReady 
+  } = useAviatorContract(account)
   const startTimeRef = useRef<number | null>(null)
+
+  // Sync round info from contract
+  useEffect(() => {
+    if (!contractReady || !useContract) return
+    
+    const syncRoundInfo = async () => {
+      try {
+        const info = await getRoundInfo()
+        setContractRoundInfo(info)
+        setRoundId(info.currentRoundId)
+        if (info.bettingOpen && !isFlying) {
+          // Round is open, can place bet
+        }
+      } catch (err) {
+        console.warn('Failed to sync round info:', err)
+      }
+    }
+
+    syncRoundInfo()
+    const interval = setInterval(syncRoundInfo, 5000) // Sync every 5 seconds
+    return () => clearInterval(interval)
+  }, [contractReady, useContract, getRoundInfo, isFlying])
 
   // Enhanced crash probability that rewards market knowledge
   const crashProbability = useCallback(() => {
@@ -163,31 +208,127 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
   }, [autoCash, crashProbability, crashed, emaLong, emaShort, isFlying, volatility])
 
   const newSeed = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
-  const start = () => {
-    setMultiplier(1.0)
-    setCrashed(false)
-    setCashedOut(false)
-    setIsFlying(true)
-    startTimeRef.current = Date.now()
-    setRoundId(r => r + 1)
-    const seed = newSeed()
-    setSeedReveal(seed)
-    // simple commit = sha-like placeholder
-    setSeedCommit(btoa(seed).slice(0, 16) + '…')
-    setFlightPoints([1.0])
+  
+  // Wave 2: Enhanced start with contract integration
+  const start = async () => {
+    if (!account) {
+      addNotification({ title: 'Wallet Required', message: 'Please connect your wallet to start', tag: 'error' })
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      if (useContract && contractReady) {
+        // Place bet on-chain
+        const betAmount = bet || '0.05'
+        const receipt = await contractPlaceBet(betAmount)
+        
+        // Track transaction
+        const provider = getProvider()
+        await trackTransaction(
+          receipt.hash,
+          `Placing bet of ${betAmount} ETH`,
+          async (hash) => {
+            const txReceipt = await provider.waitForTransaction(hash)
+            return txReceipt
+          }
+        )
+
+        // Get bet info from contract
+        const betInfo = await getBet(account)
+        if (betInfo.active) {
+          addNotification({ 
+            title: 'Bet Placed!', 
+            message: `Successfully placed bet of ${betAmount} ETH`, 
+            tag: 'success' 
+          })
+        }
+      }
+
+      // Start local simulation (works with or without contract)
+      setMultiplier(1.0)
+      setCrashed(false)
+      setCashedOut(false)
+      setIsFlying(true)
+      startTimeRef.current = Date.now()
+      setRoundId(r => r + 1)
+      const seed = newSeed()
+      setSeedReveal(seed)
+      setSeedCommit(btoa(seed).slice(0, 16) + '…')
+      setFlightPoints([1.0])
+    } catch (err: any) {
+      const parsed = parseContractError(err)
+      setError(err)
+      addNotification({ 
+        title: 'Failed to Start', 
+        message: getErrorMessage(parsed), 
+        tag: 'error' 
+      })
+    } finally {
+      setLoading(false)
+    }
   }
 
   const stop = () => { setIsFlying(false) }
 
   const penaltyPct = useMemo(() => (multiplier < 1.2 ? 0.01 : 0), [multiplier])
-  const handleCashout = (at?: number) => {
+  
+  // Wave 2: Enhanced cashout with contract integration
+  const handleCashout = async (at?: number) => {
     if (!isFlying) return
+    if (!account) {
+      addNotification({ title: 'Wallet Required', message: 'Please connect your wallet', tag: 'error' })
+      return
+    }
+
     const m = at ?? multiplier
-    const amount = parseFloat(bet) || 0
-    const payout = amount * m * (1 - penaltyPct)
-    setBalance(b => b + Math.max(0, payout - amount))
-    setIsFlying(false)
-    setCashedOut(true)
+    const targetX100 = Math.floor(m * 100) // Convert to contract format (e.g., 2.50x = 250)
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      if (useContract && contractReady) {
+        // Cash out on-chain
+        const receipt = await contractCashOut(targetX100)
+        
+        // Track transaction
+        const provider = getProvider()
+        await trackTransaction(
+          receipt.hash,
+          `Cashing out at ${m.toFixed(2)}x`,
+          async (hash) => {
+            const txReceipt = await provider.waitForTransaction(hash)
+            return txReceipt
+          }
+        )
+
+        addNotification({ 
+          title: 'Cashed Out!', 
+          message: `Successfully cashed out at ${m.toFixed(2)}x`, 
+          tag: 'success' 
+        })
+      }
+
+      // Update local state
+      const amount = parseFloat(bet) || 0
+      const payout = amount * m * (1 - penaltyPct)
+      setBalance(b => b + Math.max(0, payout - amount))
+      setIsFlying(false)
+      setCashedOut(true)
+    } catch (err: any) {
+      const parsed = parseContractError(err)
+      setError(err)
+      addNotification({ 
+        title: 'Cash Out Failed', 
+        message: getErrorMessage(parsed), 
+        tag: 'error' 
+      })
+    } finally {
+      setLoading(false)
+    }
   }
 
   // Spectator mode: automatic rounds with 10s countdown if nobody starts
@@ -242,17 +383,94 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
   }, [])
 
   return (
-            <div style={{
+    <div style={{
       background: 'rgba(0,0,0,0.4)',
       border: '1px solid rgba(124,58,237,0.3)',
       borderRadius: 12,
-      padding: 24
+      padding: 24,
+      position: 'relative'
     }}>
+      {/* Wave 2: Contract Status Indicator */}
+      {contractReady && useContract && (
+        <div style={{
+          background: 'rgba(34,197,94,0.1)',
+          border: '1px solid rgba(34,197,94,0.3)',
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 16,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8
+        }}>
+          <span>✅</span>
+          <span style={{ color: '#22c55e', fontSize: 14, fontWeight: 'bold' }}>
+            Connected to Smart Contract
+          </span>
+          {contractRoundInfo && (
+            <span style={{ color: '#9ca3af', fontSize: 12, marginLeft: 'auto' }}>
+              Round #{contractRoundInfo.currentRoundId} • {contractRoundInfo.bettingOpen ? 'Betting Open' : 'Round Closed'}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Wave 2: Error Display */}
+      {error && (
+        <ErrorMessage 
+          error={error} 
+          onRetry={() => setError(null)}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
+      {/* Wave 2: Loading Overlay */}
+      {loading && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0,0,0,0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: 12,
+          zIndex: 10
+        }}>
+          <LoadingSpinner message="Processing transaction..." />
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
         <div>Account: {account ? `${account.slice(0, 6)}…${account.slice(-4)}` : 'Not connected'}</div>
         <div>Network: {chainId ?? 'Unknown'}</div>
         <div>Balance: {balance.toFixed(4)} ETH</div>
       </div>
+
+      {/* Wave 2: Contract Toggle */}
+      {contractReady && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          marginBottom: 16,
+          padding: 8,
+          background: 'rgba(0,0,0,0.2)',
+          borderRadius: 6
+        }}>
+          <input
+            type="checkbox"
+            id="use-contract"
+            checked={useContract}
+            onChange={(e) => setUseContract(e.target.checked)}
+            style={{ cursor: 'pointer' }}
+          />
+          <label htmlFor="use-contract" style={{ color: '#9ca3af', fontSize: 12, cursor: 'pointer' }}>
+            Use Smart Contract {useContract ? '(On-chain)' : '(Simulation)'}
+          </label>
+        </div>
+      )}
       {/* Enhanced Market Data Display */}
       <div style={{ 
         background: 'linear-gradient(135deg, rgba(8, 145, 178, 0.1) 0%, rgba(14, 116, 144, 0.1) 100%)',
@@ -452,16 +670,52 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
           <div style={{ fontWeight: 700, color: crashProbability() < 0.04 ? '#22c55e' : crashProbability() < 0.08 ? '#f59e0b' : '#ef4444' }}>{(crashProbability() * 100).toFixed(1)}%</div>
             </div>
           </div>
-      <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 12 }}>
-        <button onClick={start} disabled={isFlying} style={{ padding: '10px 16px', borderRadius: 8, background: '#7c3aed', color: '#fff', border: 'none' }}>
-          Start
+      <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 12, position: 'relative' }}>
+        <button 
+          onClick={start} 
+          disabled={isFlying || loading || hasPending} 
+          style={{ 
+            padding: '10px 16px', 
+            borderRadius: 8, 
+            background: isFlying || loading || hasPending ? '#6b7280' : '#7c3aed', 
+            color: '#fff', 
+            border: 'none',
+            cursor: isFlying || loading || hasPending ? 'not-allowed' : 'pointer',
+            opacity: isFlying || loading || hasPending ? 0.6 : 1
+          }}
+        >
+          {loading ? 'Placing Bet...' : hasPending ? 'Transaction Pending...' : 'Start & Place Bet'}
         </button>
         {isFlying && !crashed && !cashedOut && (
-          <button onClick={() => handleCashout()} style={{ padding: '10px 16px', borderRadius: 8, background: '#f59e0b', color: '#111827', border: 'none' }}>
-            Cash‑out {penaltyPct > 0 ? '(1% fee)' : ''}
+          <button 
+            onClick={() => handleCashout()} 
+            disabled={loading || hasPending}
+            style={{ 
+              padding: '10px 16px', 
+              borderRadius: 8, 
+              background: loading || hasPending ? '#6b7280' : '#f59e0b', 
+              color: '#111827', 
+              border: 'none',
+              cursor: loading || hasPending ? 'not-allowed' : 'pointer',
+              opacity: loading || hasPending ? 0.6 : 1
+            }}
+          >
+            {loading ? 'Cashing Out...' : `Cash‑out ${penaltyPct > 0 ? '(1% fee)' : ''}`}
           </button>
         )}
-        <button onClick={stop} disabled={!isFlying} style={{ padding: '10px 16px', borderRadius: 8, background: '#6b7280', color: '#fff', border: 'none' }}>
+        <button 
+          onClick={stop} 
+          disabled={!isFlying || loading} 
+          style={{ 
+            padding: '10px 16px', 
+            borderRadius: 8, 
+            background: '#6b7280', 
+            color: '#fff', 
+            border: 'none',
+            cursor: !isFlying || loading ? 'not-allowed' : 'pointer',
+            opacity: !isFlying || loading ? 0.6 : 1
+          }}
+        >
           Stop
         </button>
       </div>

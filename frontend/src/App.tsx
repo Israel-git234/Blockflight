@@ -1,18 +1,24 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, lazy, Suspense } from 'react'
 
-// Feature Components
-import MarketAviator from './features/MarketAviator'
-import CruiseMode from './features/CruiseMode'
-import TradingPools from './features/TradingPools'
-import NFTRewards from './features/NFTRewards'
-import CommunityMarket from './features/CommunityMarket'
-import AIOracle from './features/AIOracle'
+// Wave 2: Code splitting for scalability
+const MarketAviator = lazy(() => import('./features/MarketAviator'))
+const CruiseMode = lazy(() => import('./features/CruiseMode'))
+const TradingPools = lazy(() => import('./features/TradingPools'))
+const NFTRewards = lazy(() => import('./features/NFTRewards'))
+const CommunityMarket = lazy(() => import('./features/CommunityMarket'))
+const AIOracle = lazy(() => import('./features/AIOracle'))
+const ValueProposition = lazy(() => import('./pages/ValueProposition'))
 
 // Components
 import WalletConnect from './components/WalletConnect'
 import FeatureSelector from './components/FeatureSelector'
 import { NotificationsProvider } from './components/NotificationsProvider'
 import NotificationBell from './components/NotificationBell'
+import LoadingSpinner from './components/LoadingSpinner'
+
+// Wave 2: UX Improvements
+import { OnboardingTutorial } from './components/OnboardingTutorial'
+import { TransactionStatus } from './components/TransactionStatus'
 
 function App() {
   const [selectedFeature, setSelectedFeature] = useState<string>('')
@@ -94,25 +100,68 @@ function App() {
       icon: '🏆',
       status: 'Coming Soon',
       color: 'from-purple-500 to-pink-500'
+    },
+    {
+      id: 'value-proposition',
+      name: 'Why BlockFlight?',
+      description: 'Learn about our unique value proposition',
+      icon: '💡',
+      status: 'Live',
+      color: 'from-yellow-500 to-orange-500'
     }
   ]
+
 
   const renderFeature = () => {
     switch (selectedFeature) {
       case 'market-aviator':
-        return <MarketAviator account={account} chainId={chainId} />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <MarketAviator account={account} chainId={chainId} />
+          </Suspense>
+        )
       case 'ai-oracle':
-        return <AIOracle />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <AIOracle />
+          </Suspense>
+        )
       case 'cruise-mode':
-        return <CruiseMode account={account} chainId={chainId} />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <CruiseMode account={account} chainId={chainId} />
+          </Suspense>
+        )
       case 'community-market':
-        return <CommunityMarket account={account} />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <CommunityMarket account={account} />
+          </Suspense>
+        )
       case 'trading-pools':
-        return <TradingPools account={account} chainId={chainId} />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <TradingPools account={account} chainId={chainId} />
+          </Suspense>
+        )
       case 'nft-rewards':
-        return <NFTRewards account={account} chainId={chainId} />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <NFTRewards account={account} chainId={chainId} />
+          </Suspense>
+        )
+      case 'value-proposition':
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <ValueProposition />
+          </Suspense>
+        )
       default:
-        return <MarketAviator account={account} chainId={chainId} />
+        return (
+          <Suspense fallback={<LoadingSpinner />}>
+            <MarketAviator account={account} chainId={chainId} />
+          </Suspense>
+        )
     }
   }
 
@@ -302,6 +351,7 @@ function App() {
         {/* Selected Feature */}
         {selectedFeature && renderFeature()}
       </main>
+
 
       {/* Global Styles */}
       <style>{`
