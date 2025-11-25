@@ -85,3 +85,12 @@ jspm_packages/
 
 # TernJS port file
 .tern-port
+
+# Internal documentation (not for public repo)
+DEPLOYMENT_GUIDE.md
+IMPLEMENTATION_STATUS.md
+PROJECT_ANALYSIS.md
+TESTING_CHECKLIST.md
+WAVE_2_IMPLEMENTATION_STATUS.md
+WAVE_2_IMPROVEMENT_PLAN.md
+WAVE_2_VISION_AND_PITCH_GUIDE.md
