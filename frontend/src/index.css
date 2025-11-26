@@ -52,6 +52,15 @@ body {
   }
 }
 
+@keyframes planeFloat {
+  0%, 100% {
+    transform: translateY(0px) rotate(-5deg);
+  }
+  50% {
+    transform: translateY(-3px) rotate(-3deg);
+  }
+}
+
 .skeleton {
   background: linear-gradient(
     90deg,

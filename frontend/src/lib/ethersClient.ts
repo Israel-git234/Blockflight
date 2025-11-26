@@ -20,8 +20,14 @@ export async function getSigner() {
 export async function getContract(address: string, abi: any, withSigner = false) {
   const provider = getProvider()
   if (withSigner && 'getSigner' in provider) {
-    const signer = await (provider as ethers.BrowserProvider).getSigner()
-    return new ethers.Contract(address, abi, signer)
+    try {
+      const signer = await (provider as ethers.BrowserProvider).getSigner()
+      return new ethers.Contract(address, abi, signer)
+    } catch (error) {
+      // If signer fails, fall back to read-only provider
+      console.warn('Failed to get signer, using read-only provider:', error)
+      return new ethers.Contract(address, abi, provider)
+    }
   }
   return new ethers.Contract(address, abi, provider)
 }

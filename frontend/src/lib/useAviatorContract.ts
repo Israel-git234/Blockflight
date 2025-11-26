@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react'
+import { useMemo, useCallback, useState, useEffect } from 'react'
 import { ethers } from 'ethers'
 import { getContract } from './ethersClient'
 import { AVIATOR_ABI } from './aviatorAbi'
@@ -8,14 +8,43 @@ import { AVIATOR_ABI } from './aviatorAbi'
  */
 export function useAviatorContract(account: string | null) {
   const contractAddress = import.meta.env.VITE_AVIATOR_CONTRACT
+  const [contract, setContract] = useState<ethers.Contract | null>(null)
 
-  const contract = useMemo(() => {
+  useEffect(() => {
     if (!contractAddress) {
       console.warn('VITE_AVIATOR_CONTRACT not set in environment variables')
-      return null
+      setContract(null)
+      return
     }
-    return getContract(contractAddress, AVIATOR_ABI, true)
-  }, [contractAddress])
+
+    let cancelled = false
+
+    const initContract = async () => {
+      try {
+        const contractInstance = await getContract(contractAddress, AVIATOR_ABI, true)
+        if (cancelled) return
+        
+        // Verify contract has expected methods
+        if (contractInstance && typeof contractInstance.currentRoundId === 'function') {
+          setContract(contractInstance)
+        } else {
+          console.error('Contract ABI mismatch: currentRoundId method not found')
+          setContract(null)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to initialize contract:', error)
+          setContract(null)
+        }
+      }
+    }
+
+    initContract()
+
+    return () => {
+      cancelled = true
+    }
+  }, [contractAddress, account])
 
   const placeBet = useCallback(async (amountEth: string) => {
     if (!contract || !account) {
@@ -95,6 +124,11 @@ export function useAviatorContract(account: string | null) {
     }
 
     try {
+      // Check if contract has the function before calling
+      if (typeof contract.currentRoundId !== 'function') {
+        throw new Error('Contract ABI mismatch: currentRoundId is not a function')
+      }
+
       const [currentRoundId, crashMultiplierX100, bettingOpen, roundStartTs] = await Promise.all([
         contract.currentRoundId(),
         contract.crashMultiplierX100(),

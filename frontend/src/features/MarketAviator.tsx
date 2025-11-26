@@ -62,59 +62,77 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
         if (info.bettingOpen && !isFlying) {
           // Round is open, can place bet
         }
-      } catch (err) {
-        console.warn('Failed to sync round info:', err)
+      } catch (err: any) {
+        // Only log if it's not a contract initialization error
+        if (!err.message?.includes('Contract not initialized') && !err.message?.includes('ABI mismatch')) {
+          console.warn('Failed to sync round info:', err)
+        }
       }
     }
 
-    syncRoundInfo()
+    // Delay initial sync to ensure contract is ready
+    const timeout = setTimeout(syncRoundInfo, 1000)
     const interval = setInterval(syncRoundInfo, 5000) // Sync every 5 seconds
-    return () => clearInterval(interval)
+    return () => {
+      clearTimeout(timeout)
+      clearInterval(interval)
+    }
   }, [contractReady, useContract, getRoundInfo, isFlying])
 
   // Enhanced crash probability that rewards market knowledge
   const crashProbability = useCallback(() => {
-    if (!startTimeRef.current) return 0.01
+    if (!startTimeRef.current) return 0.008
     const elapsed = (Date.now() - startTimeRef.current) / 1000
     
-    // Base probability - much lower to allow for longer flights
-    const base = 0.005
+    // Base probability - very low to allow for longer flights
+    const base = 0.003
     
     // Market trend analysis - this is where knowledge matters!
-    const trendStrength = Math.abs(emaShort - emaLong) / Math.max(1, emaLong)
+    const trend = (emaShort - emaLong) / Math.max(1, emaLong)
+    const trendStrength = Math.abs(trend)
     const isBullish = emaShort > emaLong
     const isBearish = emaShort < emaLong
     
-    // Volatility impact - higher volatility = more predictable crashes
-    const volFactor = 1 + Math.min(2.0, volatility * 30) // Reduced from 60 to 30
+    // Volatility impact - higher volatility = more unpredictable
+    const volFactor = 1 + Math.min(1.5, volatility * 25)
     
     // Trend-based crash probability - this rewards market knowledge
     let trendCrashChance = 1.0
-    if (isBullish && trendStrength > 0.01) {
-      // Strong bullish trend = lower crash chance (reward for recognizing uptrend)
+    if (isBullish && trendStrength > 0.015) {
+      // Very strong bullish trend = much lower crash chance
+      trendCrashChance = 0.4
+    } else if (isBullish && trendStrength > 0.01) {
+      // Strong bullish trend = lower crash chance
       trendCrashChance = 0.6
+    } else if (isBearish && trendStrength > 0.015) {
+      // Very strong bearish trend = much higher crash chance
+      trendCrashChance = 2.2
     } else if (isBearish && trendStrength > 0.01) {
-      // Strong bearish trend = higher crash chance (reward for recognizing downtrend)
+      // Strong bearish trend = higher crash chance
       trendCrashChance = 1.8
     } else if (trendStrength < 0.005) {
       // Sideways market = moderate crash chance
-      trendCrashChance = 1.2
+      trendCrashChance = 1.1
+    } else {
+      // Mild trend
+      trendCrashChance = 1.0 + (Math.abs(trend) * 5)
     }
     
-    // Multiplier risk - exponential increase but more gradual
-    const multRisk = Math.pow(Math.max(0, multiplier - 1), 1.8) / 40 // Reduced from 25 to 40
+    // Multiplier risk - exponential increase, more aggressive at higher multipliers
+    // This creates natural tension as multiplier grows
+    const multRisk = Math.pow(Math.max(0, multiplier - 1), 1.5) / 50
     
-    // Time factor - more gradual increase
-    const timeFactor = 1 + elapsed / 120 // Increased from 60 to 120
+    // Time factor - gradual increase over time
+    const timeFactor = 1 + Math.min(1.0, elapsed / 90) // Gradual increase over 90 seconds
     
-    // Market impact - reduced influence
-    const marketImpactFactor = 1 + (marketImpact * 0.2) // Reduced from 0.5 to 0.2
+    // Market impact - moderate influence
+    const marketImpactFactor = 1 + (marketImpact * 0.15)
     
     // Calculate final probability
     const finalProb = base * volFactor * trendCrashChance * timeFactor * marketImpactFactor + multRisk
     
-    // Cap the probability to allow for longer flights
-    return Math.min(0.25, finalProb) // Reduced from 0.35 to 0.25
+    // Cap the probability to allow for longer flights but ensure crashes happen
+    return Math.min(0.3, Math.max(0.001, finalProb))
   }, [emaLong, emaShort, multiplier, volatility, marketImpact])
 
   // Real-time market impact tracking
@@ -145,67 +163,107 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
 
   useEffect(() => {
     if (!isFlying || crashed) return
-    const id = setInterval(() => {
-      setMultiplier(prev => {
-        // Enhanced multiplier calculation that rewards market knowledge
-        const trend = (emaShort - emaLong) / Math.max(1, emaLong)
-        const trendStrength = Math.abs(trend)
-        
-        // Base increment - more conservative
-        let baseInc = 0.0025
-        
-        // Market knowledge rewards:
-        let knowledgeBonus = 1.0
-        if (trend > 0.01) {
-          // Strong bullish trend - reward traders who recognize this
-          knowledgeBonus = 1.4 // 40% bonus for recognizing uptrend
-        } else if (trend < -0.01) {
-          // Strong bearish trend - slower growth (crash more likely)
-          knowledgeBonus = 0.7 // 30% penalty for not recognizing downtrend
-        } else if (trendStrength < 0.005) {
-          // Sideways market - moderate growth
-          knowledgeBonus = 1.1 // 10% bonus for recognizing sideways
-        }
-        
-        // Volatility impact - higher volatility = more opportunity for skilled traders
-        const volBonus = 1 + (volatility * 0.3) // Reduced from 0.4 to 0.3
-        
-        // Calculate increment with market knowledge rewards
-        const inc = baseInc * knowledgeBonus * volBonus
-        
-        // Reduced random jitter to make it more predictable for skilled traders
-        const jitter = (Math.random() - 0.5) * 0.001 // Reduced from 0.002 to 0.001
-        
-        const next = Math.max(1, prev + inc + jitter)
-        
-        // Check for crash with enhanced probability calculation
-        if (next > 1.05 && Math.random() < crashProbability()) {
-          setCrashed(true)
-          setIsFlying(false)
+    
+    // Use requestAnimationFrame for smoother animation
+    let animationFrameId: number
+    let lastUpdate = Date.now()
+    const targetFPS = 60
+    const frameTime = 1000 / targetFPS
+    
+    const updateFlight = () => {
+      const now = Date.now()
+      const deltaTime = now - lastUpdate
+      
+      if (deltaTime >= frameTime) {
+        setMultiplier(prev => {
+          // Enhanced multiplier calculation with exponential growth curve
+          const trend = (emaShort - emaLong) / Math.max(1, emaLong)
+          const trendStrength = Math.abs(trend)
+          
+          // Exponential growth: faster at start, slower at higher multipliers
+          // Base increment scales with multiplier (slower as it grows)
+          const baseInc = 0.008 * Math.pow(0.95, Math.max(0, prev - 1) * 10)
+          
+          // Market knowledge rewards:
+          let knowledgeBonus = 1.0
+          if (trend > 0.015) {
+            // Very strong bullish trend - significant bonus
+            knowledgeBonus = 1.6
+          } else if (trend > 0.01) {
+            // Strong bullish trend - reward traders who recognize this
+            knowledgeBonus = 1.4
+          } else if (trend < -0.015) {
+            // Very strong bearish trend - significant penalty
+            knowledgeBonus = 0.5
+          } else if (trend < -0.01) {
+            // Strong bearish trend - slower growth (crash more likely)
+            knowledgeBonus = 0.7
+          } else if (trendStrength < 0.005) {
+            // Sideways market - moderate growth
+            knowledgeBonus = 1.1
+          } else {
+            // Mild trend
+            knowledgeBonus = 1.0 + (trend * 10)
+          }
+          
+          // Volatility impact - higher volatility = more opportunity but more risk
+          const volBonus = 1 + (volatility * 0.4)
+          
+          // Time-based acceleration (slight boost over time to keep it interesting)
+          const elapsed = startTimeRef.current ? (Date.now() - startTimeRef.current) / 1000 : 0
+          const timeBoost = 1 + Math.min(0.2, elapsed / 30) // Up to 20% boost after 30 seconds
+          
+          // Calculate increment with all factors
+          const inc = baseInc * knowledgeBonus * volBonus * timeBoost
+          
+          // Smooth random jitter for natural movement
+          const jitter = (Math.random() - 0.5) * 0.002
+          
+          const next = Math.max(1, prev + inc + jitter)
+          
+          // Check for crash with enhanced probability calculation
+          if (next > 1.02 && Math.random() < crashProbability()) {
+            setCrashed(true)
+            setIsFlying(false)
+            setFlightPoints(arr => {
+              const a = [...arr, +next.toFixed(4)]
+              return a.length > 200 ? a.slice(a.length - 200) : a
+            })
+            return +next.toFixed(4)
+          }
+          
+          // Auto cashout check
+          if (autoCash && parseFloat(autoCash) > 1 && next >= parseFloat(autoCash)) {
+            handleCashout(next)
+            setFlightPoints(arr => {
+              const a = [...arr, +next.toFixed(4)]
+              return a.length > 200 ? a.slice(a.length - 200) : a
+            })
+            return +next.toFixed(4)
+          }
+          
+          const nn = +next.toFixed(4)
           setFlightPoints(arr => {
-            const a = [...arr, +next.toFixed(4)]
-            return a.length > 180 ? a.slice(a.length - 180) : a
+            const a = [...arr, nn]
+            return a.length > 200 ? a.slice(a.length - 200) : a
           })
-          return +next.toFixed(4)
-        }
-        if (autoCash && parseFloat(autoCash) > 1 && next >= parseFloat(autoCash)) {
-          handleCashout(next)
-          setFlightPoints(arr => {
-            const a = [...arr, +next.toFixed(4)]
-            return a.length > 180 ? a.slice(a.length - 180) : a
-          })
-          return +next.toFixed(4)
-        }
-        const nn = +next.toFixed(4)
-        setFlightPoints(arr => {
-          const a = [...arr, nn]
-          return a.length > 180 ? a.slice(a.length - 180) : a
+          return nn
         })
-        return nn
-      })
-      }, 120)
-    return () => clearInterval(id)
-  }, [autoCash, crashProbability, crashed, emaLong, emaShort, isFlying, volatility])
+        
+        lastUpdate = now
+      }
+      
+      animationFrameId = requestAnimationFrame(updateFlight)
+    }
+    
+    animationFrameId = requestAnimationFrame(updateFlight)
+    
+    return () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId)
+      }
+    }
+  }, [autoCash, crashProbability, crashed, emaLong, emaShort, isFlying, volatility, handleCashout])
 
   const newSeed = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
   
@@ -355,23 +413,33 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
     const maxSamples = Math.max(2, flightPoints.length)
     const stepX = 940 / (maxSamples - 1) // leave 60px left margin
     const baseY = 165
-    const scaleY = 50
+    const scaleY = 45 // Slightly adjusted for better visualization
     const clamp = (y: number) => Math.max(25, Math.min(baseY, y))
+    
+    // Smooth the path using simple averaging for better visual flow
+    const smoothPoints = flightPoints.map((point, i) => {
+      if (i === 0 || i === flightPoints.length - 1) return point
+      return (flightPoints[i - 1] + point + flightPoints[i + 1]) / 3
+    })
+    
     let dArea = `M 60 ${baseY}`
     let dLine = ''
     let x = 60
-    for (let i = 0; i < flightPoints.length; i++) {
+    for (let i = 0; i < smoothPoints.length; i++) {
       x = 60 + i * stepX
-      const m = flightPoints[i]
-      const y = clamp(baseY - Math.min((m - 1) * scaleY, 140))
+      const m = smoothPoints[i]
+      // Logarithmic scale for higher multipliers to show detail at lower ranges
+      const scaledMultiplier = m > 2 ? 1 + Math.log(m) / Math.log(2) : m
+      const y = clamp(baseY - Math.min((scaledMultiplier - 1) * scaleY, 140))
       dArea += ` L ${x} ${y}`
       dLine += (i === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`)
     }
     dArea += ` L ${x} ${baseY} L 60 ${baseY} Z`
     const planeX = x
     const planeY = (() => {
-      const m = flightPoints[flightPoints.length - 1]
-      return clamp(baseY - Math.min((m - 1) * scaleY, 140))
+      const m = smoothPoints[smoothPoints.length - 1]
+      const scaledMultiplier = m > 2 ? 1 + Math.log(m) / Math.log(2) : m
+      return clamp(baseY - Math.min((scaledMultiplier - 1) * scaleY, 140))
     })()
     return { areaPath: dArea, linePath: dLine, planeX, planeY }
   }, [flightPoints])
@@ -528,11 +596,13 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
             overflow: 'hidden'
           }}>
             {volatilityHistory.length > 1 && (
-              <svg width="100%" height="100%" style={{ position: 'absolute', top: 0, left: 0 }}>
+              <svg width="100%" height="100%" style={{ position: 'absolute', top: 0, left: 0 }} viewBox="0 0 100 40" preserveAspectRatio="none">
                 <polyline
-                  points={volatilityHistory.map((vol, i) => 
-                    `${(i / (volatilityHistory.length - 1)) * 100}%,${100 - (vol * 2000)}`
-                  ).join(' ')}
+                  points={volatilityHistory.map((vol, i) => {
+                    const x = (i / (volatilityHistory.length - 1)) * 100
+                    const y = Math.max(0, Math.min(40, 40 - (vol * 2000)))
+                    return `${x},${y}`
+                  }).join(' ')}
                   fill="none"
                   stroke={volatility > 0.02 ? '#ef4444' : '#0891b2'}
                   strokeWidth="2"
@@ -632,8 +702,23 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
             <path d={svgPaths.linePath} fill="none" stroke="rgba(220,38,38,0.95)" strokeWidth="3" />
           )}
         </svg>
-        <div style={{ position: 'absolute', left: `${(svgPaths as any).planeX ?? 60}px`, top: `${(svgPaths as any).planeY ?? 165}px`, transform: 'translate(-50%, -50%)' }}>
-          <span style={{ fontSize: 28, filter: 'url(#planeGlow)' }}>{crashed ? '💥' : '✈️'}</span>
+        <div style={{ 
+          position: 'absolute', 
+          left: `${(svgPaths as any).planeX ?? 60}px`, 
+          top: `${(svgPaths as any).planeY ?? 165}px`, 
+          transform: 'translate(-50%, -50%)',
+          transition: isFlying ? 'none' : 'all 0.3s ease-out',
+          animation: isFlying && !crashed ? 'planeFloat 2s ease-in-out infinite' : 'none'
+        }}>
+          <span style={{ 
+            fontSize: 28, 
+            filter: 'url(#planeGlow)',
+            display: 'inline-block',
+            transform: crashed ? 'rotate(90deg) scale(1.5)' : isFlying ? 'rotate(-5deg)' : 'rotate(0deg)',
+            transition: 'transform 0.2s ease-out'
+          }}>
+            {crashed ? '💥' : '✈️'}
+          </span>
         </div>
         {!isFlying && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#93c5fd', fontFamily: 'monospace', fontSize: 48, fontWeight: 700 }}>
@@ -652,9 +737,22 @@ const MarketAviator: React.FC<MarketAviatorProps> = ({ account, chainId }) => {
         fontWeight: 700,
         color: crashed ? '#f87171' : cashedOut ? '#fde047' : '#34d399',
         textAlign: 'center',
-        marginBottom: 16
+        marginBottom: 16,
+        textShadow: isFlying && !crashed ? '0 0 20px rgba(52, 211, 153, 0.5)' : 'none',
+        transition: 'all 0.3s ease',
+        transform: isFlying && multiplier > 1.5 ? 'scale(1.05)' : 'scale(1)',
+        animation: isFlying && multiplier > 2.0 ? 'pulse 1s ease-in-out infinite' : 'none'
       }}>
         {multiplier.toFixed(2)}x {crashed ? '💥' : cashedOut ? '🪂' : '🚀'}
+        {isFlying && multiplier > 1.5 && (
+          <span style={{ 
+            fontSize: 24, 
+            marginLeft: 8,
+            animation: 'pulse 0.5s ease-in-out infinite'
+          }}>
+            ⚡
+          </span>
+        )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, alignItems: 'center', marginBottom: 12 }}>
         <div>
